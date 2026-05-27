@@ -1,12 +1,8 @@
 import time
 import csv
 import numpy as np
-from scipy.spatial.transform import Rotation, Slerp
 from piper_sdk import *
 
-# ============================================================================
-# === CONFIGURATION ==========================================================
-# ============================================================================
 
 log_counter = 1
 speed = 8
@@ -15,137 +11,16 @@ count_constant = 2000
 TRAJ_STREAM_DT = 0.02
 TRAJ_STREAM_SPEED = 90
 
-# ============================================================================
-# === DH-PARAMETRE & IK (fra piper_ik_final_v2.py) ===========================
-# ============================================================================
-d1 = 0.123
-a3 = 0.28503
-a4 = -0.02198
-d4 = 0.25075
-d6 = 0.111
 
-theta2_offset = -172.22 * np.pi / 180
-theta3_offset = -102.78 * np.pi / 180
-
-PIPER_LIMITS = [
-    (-2.687, 2.687),
-    (0.0,    3.403),
-    (-3.054, 0.0),
-    (-1.850, 1.850),
-    (-1.309, 1.309),
-    (-1.745, 1.745),
-]
-
-
-def wrap(angle):
-    return (angle + np.pi) % (2 * np.pi) - np.pi
-
-
-def dh_transform(alpha, a, d, theta):
-    ca, sa = np.cos(alpha), np.sin(alpha)
-    ct, st = np.cos(theta), np.sin(theta)
-    return np.array([
-        [ct,     -st,     0,    a    ],
-        [st*ca,  ct*ca,  -sa,  -sa*d ],
-        [st*sa,  ct*sa,   ca,   ca*d ],
-        [0,      0,       0,    1    ],
-    ])
-
-
-def forward_kinematics(thetas):
-    t1, t2, t3, t4, t5, t6 = thetas
-    T01 = dh_transform(0,        0,    d1, t1)
-    T12 = dh_transform(-np.pi/2, 0,    0,  t2 + theta2_offset)
-    T23 = dh_transform(0,        a3,   0,  t3 + theta3_offset)
-    T34 = dh_transform(np.pi/2,  a4,   d4, t4)
-    T45 = dh_transform(-np.pi/2, 0,    0,  t5)
-    T56 = dh_transform(np.pi/2,  0,    d6, t6)
-    return T01 @ T12 @ T23 @ T34 @ T45 @ T56
-
-
-def compute_T03(t1, t2, t3):
-    T01 = dh_transform(0,        0,  d1, t1)
-    T12 = dh_transform(-np.pi/2, 0,  0,  t2 + theta2_offset)
-    T23 = dh_transform(0,        a3, 0,  t3 + theta3_offset)
-    return T01 @ T12 @ T23
-
-
-def compute_T01(t1):
-    return dh_transform(0, 0, d1, t1)
-
-
-def inverse_kinematics(p_d, R_d):
-    p_d = np.asarray(p_d, dtype=float)
-    R_d = np.asarray(R_d, dtype=float)
-    p_w = p_d - d6 * R_d[:, 2]
-    solutions = []
-    t1_a = np.arctan2(p_w[1], p_w[0])
-    for theta1 in (t1_a, t1_a + np.pi):
-        T01 = compute_T01(theta1)
-        p_w_f1 = np.linalg.inv(T01) @ np.append(p_w, 1.0)
-        x1, y1, z1 = p_w_f1[:3]
-        if abs(y1) > 1e-6:
-            continue
-        A = x1
-        B = -z1
-        C = (x1**2 + z1**2 + a3**2 - a4**2 - d4**2) / (2 * a3)
-        norm_AB = np.hypot(A, B)
-        if norm_AB < 1e-12 or abs(C / norm_AB) > 1:
-            continue
-        phi_ab = np.arctan2(B, A)
-        base = np.arccos(np.clip(C / norm_AB, -1, 1))
-        for sign_u in (+1, -1):
-            u = phi_ab + sign_u * base
-            M = np.array([[d4, a4], [-a4, d4]])
-            rhs = np.array([x1 - a3*np.cos(u), z1 + a3*np.sin(u)])
-            sinS, cosS = np.linalg.solve(M, rhs)
-            S = np.arctan2(sinS, cosS)
-            v = wrap(S - u)
-            theta2 = u - theta2_offset
-            theta3 = wrap(v - theta3_offset)
-            T03 = compute_T03(theta1, theta2, theta3)
-            R03 = T03[:3, :3]
-            R36 = R03.T @ R_d
-            cos_t5 = -R36[1, 2]
-            sin_sq = R36[0, 2]**2 + R36[2, 2]**2
-            if sin_sq < 1e-12:
-                theta5 = 0.0 if cos_t5 > 0 else np.pi
-                theta4 = 0.0
-                theta6 = np.arctan2(-R36[0, 1], R36[0, 0])
-                solutions.append((wrap(theta1), theta2, theta3,
-                                  wrap(theta4), wrap(theta5), wrap(theta6)))
-                continue
-            for sign_s5 in (+1, -1):
-                sin_t5 = sign_s5 * np.sqrt(sin_sq)
-                theta5 = np.arctan2(sin_t5, cos_t5)
-                theta4 = np.arctan2(R36[2, 2] / sin_t5, R36[0, 2] / sin_t5)
-                theta6 = np.arctan2(-R36[1, 1] / sin_t5, R36[1, 0] / sin_t5)
-                solutions.append((wrap(theta1), theta2, theta3,
-                                  wrap(theta4), wrap(theta5), wrap(theta6)))
-    return solutions
-
-
-def verify_and_filter(solutions, p_d, R_d, tol=1e-4):
-    good = []
-    for sol in solutions:
-        T = forward_kinematics(sol)
-        p_err = np.linalg.norm(T[:3, 3] - p_d)
-        R_err = np.linalg.norm(T[:3, :3] - R_d)
-        if p_err < tol and R_err < tol:
-            good.append((sol, p_err, R_err))
-    return good
-
-
-# ============================================================================
-# === LSPB FUNCTION ==========================================================
-# ============================================================================
+# ---------------------------------------------------------------------------
+#  LSPB FUNCTION 
+# --------------------------------------------------------------------------
 
 def lspb_via_points(via, segment_durations, max_accel, dt=0.01):
-    """LSPB trajectory through a sequence of joint angles for ONE joint."""
     via = np.asarray(via, dtype=float)
     td = np.asarray(segment_durations, dtype=float)
     n = len(via)
-    assert len(td) == n - 1, "Need n-1 segment durations for n via points"
+    assert len(td) == n - 1, "Der skal være n-1 segment durations for n via points"
 
     v = np.zeros(n - 1)
     t_b = np.zeros(n)
@@ -157,7 +32,7 @@ def lspb_via_points(via, segment_durations, max_accel, dt=0.01):
         a_signed[0] = np.sign(via[1] - via[0]) * max_accel
         disc = td[0]**2 - 2 * (via[1] - via[0]) / a_signed[0]
         if disc < 0:
-            raise ValueError("Infeasible at first via")
+            raise ValueError("Ikke muligt ved første via")
         t_b[0] = td[0] - np.sqrt(disc)
         v[0] = (via[1] - via[0]) / (td[0] - 0.5 * t_b[0])
 
@@ -167,7 +42,7 @@ def lspb_via_points(via, segment_durations, max_accel, dt=0.01):
         a_signed[-1] = np.sign(via[-2] - via[-1]) * max_accel
         disc = td[-1]**2 + 2 * (via[-1] - via[-2]) / a_signed[-1]
         if disc < 0:
-            raise ValueError("Infeasible at last via")
+            raise ValueError("Ikke muligt ved sidste via")
         t_b[-1] = td[-1] - np.sqrt(disc)
         v[-1] = (via[-1] - via[-2]) / (td[-1] - 0.5 * t_b[-1])
 
@@ -188,7 +63,7 @@ def lspb_via_points(via, segment_durations, max_accel, dt=0.01):
     for j in range(1, n - 2):
         t_lin[j] = td[j] - 0.5 * t_b[j] - 0.5 * t_b[j + 1]
     if any(t_lin < -1e-9):
-        raise ValueError("Blend zones overlap")
+        raise ValueError("Blend overlapper")
 
     T_total = float(np.sum(td))
     t = np.arange(0, T_total + dt, dt)
@@ -235,103 +110,9 @@ def lspb_via_points(via, segment_durations, max_accel, dt=0.01):
     return t, theta, theta_dot, theta_ddot, t_b
 
 
-# ============================================================================
-# === HJÆLPEFUNKTIONER TIL VIPPE-BEVÆGELSE ===================================
-# ============================================================================
-
-def build_tilt_via_points(start_joints, end_joints, n_via_points=20):
-    """
-    Bygger en liste af via-points i ledrum, hvor TCP-positionen holdes
-    konstant gennem hele bevægelsen og kun orienteringen ændres.
-    
-    Input:  start_joints og end_joints (lister med 6 led-vinkler i radianer)
-    Output: numpy-array med shape (n_via_points, 6) klar til LSPB
-    
-    Trinene er:
-    1. Beregn start- og slut-pose med FK
-    2. For hvert ønsket via-point, lav SLERP mellem rotationerne
-    3. Hold positionen konstant
-    4. Brug IK til at finde de led-vinkler der opnår den ønskede pose
-    5. Vælg løsningen tættest på den forrige (for kontinuitet)
-    """
-    
-    # 1. FK på start og slut for at finde poses
-    T_start = forward_kinematics(start_joints)
-    T_end = forward_kinematics(end_joints)
-    
-    p_target = T_start[:3, 3]            # TCP-position skal være KONSTANT
-    R_start = T_start[:3, :3]
-    R_end = T_end[:3, :3]
-    
-    # 2. Tjek at start og slut faktisk har samme TCP-position
-    p_diff = np.linalg.norm(T_end[:3, 3] - p_target)
-    if p_diff > 0.005:
-        print(f"  ADVARSEL: start og slut har {p_diff*1000:.1f}mm positionsforskel")
-        print(f"           Bevægelsen bliver ikke en ren vippe.")
-    
-    print(f"  Konstant TCP-position: {p_target.round(4)} m")
-    print(f"  Bygger {n_via_points} via-points...")
-    
-    # 3. SLERP-objekt til orienterings-interpolation
-    rotations = Rotation.from_matrix(np.stack([R_start, R_end]))
-    slerp_obj = Slerp([0, 1], rotations)
-    
-    # 4. Liste til de udregnede via-points
-    via_joints = []
-    current_joints = np.array(start_joints)
-    
-    # 5. For hvert via-point: SLERP → IK → vælg løsning
-    s_values = np.linspace(0, 1, n_via_points)
-    
-    for i, s in enumerate(s_values):
-        # Den ønskede orientering for dette via-point
-        R_now = slerp_obj([s]).as_matrix()[0]
-        
-        # IK for konstant position, varierende orientering
-        raw_sols = inverse_kinematics(p_target, R_now)
-        good = verify_and_filter(raw_sols, p_target, R_now)
-        
-        # Filtrér løsninger der overtræder ledgrænserne
-        LIMIT_TOL = 0.05  # 0.05 rad tolerance for numeriske unøjagtigheder nær grænser
-        valid = [sol for sol, _, _ in good
-                 if all(lo - LIMIT_TOL <= q <= hi + LIMIT_TOL
-                        for q, (lo, hi) in zip(sol, PIPER_LIMITS))]
-
-        if not valid and good:
-            # Ingen løsning inden for tolerance — brug den med mindst grænseovertrædelse
-            def limit_violation(sol):
-                return sum(max(0.0, lo - q, q - hi)
-                           for q, (lo, hi) in zip(sol, PIPER_LIMITS))
-            best_sol, best_pe, best_re = min(good, key=lambda x: limit_violation(x[0]))
-            viol = limit_violation(best_sol)
-            if viol > 0.15:
-                raise RuntimeError(
-                    f"Ingen gyldig IK-løsning ved s={s:.3f} (via-point {i}), "
-                    f"mindste grænseovertrædelse = {viol:.4f} rad"
-                )
-            print(f"  ADVARSEL via-point {i}: bedste løsning har {viol:.4f} rad grænseovertrædelse")
-            valid = [best_sol]
-
-        if not valid:
-            raise RuntimeError(
-                f"Ingen gyldig IK-løsning ved s={s:.3f} (via-point {i})"
-            )
-        
-        # Vælg løsningen tættest på forrige (kontinuitet)
-        chosen = min(valid, key=lambda q: np.linalg.norm(
-            wrap(np.array(q) - current_joints)
-        ))
-        
-        via_joints.append(list(chosen))
-        current_joints = np.array(chosen)
-    
-    print(f"  Færdig - alle {n_via_points} via-points udregnet")
-    return np.array(via_joints)
-
-
-# ============================================================================
-# === MAIN PROGRAM ===========================================================
-# ============================================================================
+# --------------------------------------------------------------------------
+# MAIN PROGRAM 
+# --------------------------------------------------------------------------
 
 if __name__ == "__main__":
     piper = C_PiperInterface_V2("can0")
@@ -377,27 +158,14 @@ if __name__ == "__main__":
         piper.MotionCtrl_2(0x01, 0x01, speed, 0x00)
         piper.JointCtrl(joint_0, joint_1, joint_2, joint_3, joint_4, joint_5)
 
-    def piper_linear_movement(XYZRPY6):
-        X = round(XYZRPY6[0] * factorMeterToMicro)
-        Y = round(XYZRPY6[1] * factorMeterToMicro)
-        Z = round(XYZRPY6[2] * factorMeterToMicro)
-        RX = round(XYZRPY6[3] * factorRadToDeg)
-        RY = round(XYZRPY6[4] * factorRadToDeg)
-        RZ = round(XYZRPY6[5] * factorRadToDeg)
-        joint_6 = round(XYZRPY6[6] * factorRadToDeg)
-        print(X, Y, Z, RX, RY, RZ)
-        piper.MotionCtrl_2(0x01, 0x02, speed * 3, 0x00)
-        piper.EndPoseCtrl(X, Y, Z, RX, RY, RZ)
-        piper.GripperCtrl(abs(joint_6), 1000, 0x01, 0)
-
     # ------------------------------------------------------------------------
-    # LSPB streaming function (uændret fra din kode)
+    # LSPB streaming function
     # ------------------------------------------------------------------------
     def execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                 dt=TRAJ_STREAM_DT, log_csv_path=None):
         via = np.asarray(via_points, dtype=float)
         n_joints = via.shape[1]
-        assert n_joints == 6, "Expected 6-joint trajectory"
+        assert n_joints == 6, "Der forventes 6-joint trajectory"
 
         if np.isscalar(max_accel):
             max_accels = [float(max_accel)] * n_joints
@@ -452,7 +220,6 @@ if __name__ == "__main__":
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
-        # pos_end nået — gem al indsamlet data til CSV
         if log_csv_path is not None:
             with open(log_csv_path, mode="w", newline="") as csv_file:
                 csv_writer = csv.writer(csv_file)
@@ -470,118 +237,76 @@ if __name__ == "__main__":
         print(f"  → Trajectory complete in {elapsed:.2f} s")
 
     # ------------------------------------------------------------------------
-    # Via-point CSV export: FK on each via point → position + orientation
-    # ------------------------------------------------------------------------
-    def save_via_points_csv(via_points_array, csv_path):
-        with open(csv_path, mode="w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                "index",
-                "q1_rad", "q2_rad", "q3_rad", "q4_rad", "q5_rad", "q6_rad",
-                "x_m", "y_m", "z_m",
-                "rx_rad", "ry_rad", "rz_rad",
-                "qx", "qy", "qz", "qw"
-            ])
-            for i, q in enumerate(via_points_array):
-                T = forward_kinematics(q)
-                pos = T[:3, 3]
-                rot = Rotation.from_matrix(T[:3, :3])
-                rpy = rot.as_euler("xyz")
-                quat = rot.as_quat()  # [qx, qy, qz, qw]
-                writer.writerow([
-                    i,
-                    round(q[0], 6), round(q[1], 6), round(q[2], 6),
-                    round(q[3], 6), round(q[4], 6), round(q[5], 6),
-                    round(pos[0], 6), round(pos[1], 6), round(pos[2], 6),
-                    round(rpy[0], 6), round(rpy[1], 6), round(rpy[2], 6),
-                    round(quat[0], 6), round(quat[1], 6),
-                    round(quat[2], 6), round(quat[3], 6),
-                ])
-        print(f"  → Via-point poses saved to {csv_path}")
-
-    # ========================================================================
-    # === MAIN LOOP ==========================================================
-    # ========================================================================
+    # MAIN LOOP 
+    # -----------------------------------------------------------------------
     while True:
         count += 1
         log_now = False
 
-        #if count == count_constant * 1:
-            
-            #print("Pos 1 -----------")
-            #position = [0.0, 0.0, 0.0, 0.0, 0.0, -np.pi/6]
-            #piper_joint_movement(position)
-            #log_now = True
-
         if count == count_constant * 1:
             print("Pos 2 -----------")
-            position = [0.0, 0.9139, -0.6589, 0.0, -0.1678, -np.pi/6]
+            position = [0.0, 0.9139, -0.6589, 0.0, -0.1678, -0.5236]
             piper_joint_movement(position)
             log_now = True
 
         elif count == count_constant * 2:
             print("Pos 3 -----------")
-            position = [0.0, 1.7168, -0.7379, 0.0, -0.3679, -np.pi/6]  # 60°
+            position = [0.0, 1.7168, -0.7379, 0.0, -0.3679, -0.5236]  # 60°
             piper_joint_movement(position)
             log_now = True
 
         # --------------------------------------------------------------------
-        # TRAJ 1 — Vippe-bevægelse fra 60° til 90° med konstant TCP-position
-        #          1. Definer start- og slut-joint-angles
-        #          2. Lad build_tilt_via_points beregne mellemliggende punkter
-        #          3. Send hele sættet til LSPB-streaming (samme som før)
+        # TRAJ 1 — Vippe-bevægelse fra 60° til 90°
         # --------------------------------------------------------------------
         elif count == count_constant * 3:
-            print("TRAJ 1 ----------- (Vippe-bevægelse, konstant TCP-position)")
-            
-            # Input: kun joint-angles for start og slut
-            pos_start = [0.0, 1.7168, -0.7379, 0.0, -0.3679, -np.pi/6]  # 60°
-            pos_end   = [0.0, 1.8817, -1.2589, 0.0, 1.0353, -np.pi/6]  # 90°
-            
-            # Beregn via-points der holder TCP-positionen konstant
-            via_points = build_tilt_via_points(
-                start_joints=pos_start,
-                end_joints=pos_end,
-                n_via_points=20         # Antal mellempunkter
-            )
+            print("TRAJ 1 ----------- (Vippe-bevægelse, 20 via. points)")
 
-            save_via_points_csv(
-                via_points,
-                "/home/tudor/Desktop/Piper_SDK_Programs/virker/TRAJ1_via_points.csv"
-            )
+            via_points = np.array([
+                [0.0000,  1.7168, -0.7379,  0.0000, -0.3679, -0.5236],
+                [0.0000,  1.7110, -0.7589,  0.0000, -0.2859, -0.5236],
+                [0.0000,  1.7071, -0.7811, -0.0000, -0.2048, -0.5236],
+                [0.0000,  1.7053, -0.8044,  0.0000, -0.1245, -0.5236],
+                [0.0000,  1.7053, -0.8288,  0.0000, -0.0451, -0.5236],
+                [0.0000,  1.7073, -0.8540,  0.0000,  0.0333, -0.5236],
+                [0.0000,  1.7109, -0.8801,  0.0000,  0.1108, -0.5236],
+                [0.0000,  1.7163, -0.9069,  0.0000,  0.1874, -0.5236],
+                [0.0000,  1.7233, -0.9344,  0.0000,  0.2630, -0.5236],
+                [0.0000,  1.7319, -0.9625,  0.0000,  0.3376, -0.5236],
+                [0.0000,  1.7418, -0.9910,  0.0000,  0.4113, -0.5236],
+                [0.0000,  1.7531, -1.0200,  0.0000,  0.4841, -0.5236],
+                [0.0000,  1.7657, -1.0493,  0.0000,  0.5560, -0.5236],
+                [0.0000,  1.7794, -1.0790,  0.0000,  0.6270, -0.5236],
+                [0.0000,  1.7943, -1.1088,  0.0000,  0.6971, -0.5236],
+                [0.0000,  1.8101, -1.1388,  0.0000,  0.7663, -0.5236],
+                [0.0000,  1.8268, -1.1688,  0.0000,  0.8348, -0.5236],
+                [0.0000,  1.8444, -1.1989,  0.0000,  0.9024, -0.5236],
+                [0.0000,  1.8627, -1.2289,  0.0000,  0.9692, -0.5236],
+                [0.0000,  1.8818, -1.2589,  0.0000,  1.0352, -0.5236],
+            ])
 
-            # En segment_duration per gap mellem via-points
-            # Med 20 via-points har vi 19 segmenter
             total_duration = 5.0
             n_segments = len(via_points) - 1
             segment_durations = [total_duration / n_segments] * n_segments
-            
+
             max_accel = 3.14
-            
+
             execute_lspb_trajectory(
                 via_points, segment_durations, max_accel,
                 dt=TRAJ_STREAM_DT,
                 log_csv_path="/home/tudor/Desktop/Piper_SDK_Programs/virker/TRAJ1_positions.csv"
             )
-            
 
             print("Pos 4 -----------")
-            position = [0.0, 1.8817, -1.2589, 0.0, 1.0353, -np.pi/6]
+            position = [0.0, 1.8817, -1.2589, 0.0, 1.0353, -0.5236]
             piper_joint_movement(position)
             log_now = True
 
         # --------------------------------------------------------------------
-        
-        elif count == count_constant *4:
+
+        elif count == count_constant * 4:
             print("Pos 5 -----------")
-            position = [0.0, 0.9139, -0.6589, 0.0, -0.1678, -np.pi/6]
+            position = [0.0, 0.9139, -0.6589, 0.0, -0.1678, -0.5236]
             piper_joint_movement(position)
-            #log_now = True
-        #elif count == count_constant * 5:
-           # print("Pos 6 -----------")
-           # position = [0.0, 0.0, 0.0, 0.0, 0.0, -np.pi/6]
-           # piper_joint_movement(position)
-           # log_now = True
 
         if log_now:
             time.sleep(2)
