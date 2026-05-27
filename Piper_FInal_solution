@@ -3,59 +3,54 @@ import csv
 import numpy as np
 from piper_sdk import *
 
-# ============================================================================
-# === CONFIGURATION ==========================================================
-# ============================================================================
 
 log_counter = 1
-speed = 15                # Used by piper_joint_movement (internal motion controller)
+speed = 15                #Speed parameter, vi kan bruge til at styre piperens hastighed med 
 count_constant = 100
 
-# LSPB streaming parameters
-TRAJ_STREAM_DT = 0.02        # 50 Hz streaming rate (20 ms between commands)
-TRAJ_STREAM_SPEED = 90      # Internal speed limit during streaming (max so it doesn't throttle us)
+# LSPB parametre
+TRAJ_STREAM_DT = 0.02        
+TRAJ_STREAM_SPEED = 90      
 
 
-# ============================================================================
-# === LSPB FUNCTIONS =========================================================
-# ============================================================================
-# (Imported from your lspb_6dof.py — copy them here for self-contained file,
-#  or replace this block with: from lspb_6dof import lspb_via_points)
+# ---------------------------------------------------------------------- 
+# LSPB Funktioner 
+# ---------------------------------------------------------------------
+
 
 def lspb_via_points(via, segment_durations, max_accel, dt=0.01):
-    """LSPB trajectory through a sequence of joint angles for ONE joint."""
     via = np.asarray(via, dtype=float)
     td = np.asarray(segment_durations, dtype=float)
     n = len(via)
-    assert len(td) == n - 1, "Need n-1 segment durations for n via points"
+    assert len(td) == n - 1, "Der skal være n-1 segment durations for n via points"
 
     v = np.zeros(n - 1)
     t_b = np.zeros(n)
     a_signed = np.zeros(n)
 
-    # First via point (start from rest)
+    #Første via point (start from rest)
     if abs(via[1] - via[0]) < 1e-12:
         t_b[0] = 0.0; a_signed[0] = 0.0; v[0] = 0.0
     else:
         a_signed[0] = np.sign(via[1] - via[0]) * max_accel
         disc = td[0]**2 - 2 * (via[1] - via[0]) / a_signed[0]
         if disc < 0:
-            raise ValueError("Infeasible at first via — increase max_accel or duration")
+            raise ValueError("Det er ikke muligt. Der er enten for lav acceleration eller for kort segmentvarighed(Første via)")
         t_b[0] = td[0] - np.sqrt(disc)
         v[0] = (via[1] - via[0]) / (td[0] - 0.5 * t_b[0])
 
-    # Last via point (decelerate to rest)
+    # sidste via point
     if abs(via[-1] - via[-2]) < 1e-12:
         t_b[-1] = 0.0; a_signed[-1] = 0.0; v[-1] = 0.0
     else:
         a_signed[-1] = np.sign(via[-2] - via[-1]) * max_accel
         disc = td[-1]**2 + 2 * (via[-1] - via[-2]) / a_signed[-1]
         if disc < 0:
-            raise ValueError("Infeasible at last via — increase max_accel or duration")
+            raise ValueError("Det er ikke muligt. Der er enten for lav acceleration eller for kort segmentvarighed(Første via)")
         t_b[-1] = td[-1] - np.sqrt(disc)
         v[-1] = (via[-1] - via[-2]) / (td[-1] - 0.5 * t_b[-1])
 
-    # Intermediate via points
+    # mellem via points
     for k in range(1, n - 1):
         v_in = v[0] if k == 1 else (via[k] - via[k - 1]) / td[k - 1]
         v_out = v[-1] if k == n - 2 else (via[k + 1] - via[k]) / td[k]
@@ -67,16 +62,16 @@ def lspb_via_points(via, segment_durations, max_accel, dt=0.01):
             a_signed[k] = np.sign(v_out - v_in) * max_accel
             t_b[k] = (v_out - v_in) / a_signed[k]
 
-    # Linear segment durations
+    # Linear segment varighed
     t_lin = np.zeros(n - 1)
     t_lin[0] = td[0] - t_b[0] - 0.5 * t_b[1]
     t_lin[-1] = td[-1] - t_b[-1] - 0.5 * t_b[-2]
     for j in range(1, n - 2):
         t_lin[j] = td[j] - 0.5 * t_b[j] - 0.5 * t_b[j + 1]
     if any(t_lin < -1e-9):
-        raise ValueError("Blend zones overlap — increase durations or max_accel")
+        raise ValueError("Det er ikke muligt. Der er enten for lav acceleration eller for kort segmentvarighed(lineær segment)")
 
-    # Build time grid and evaluate
+   
     T_total = float(np.sum(td))
     t = np.arange(0, T_total + dt, dt)
     theta = np.zeros_like(t)
@@ -122,9 +117,9 @@ def lspb_via_points(via, segment_durations, max_accel, dt=0.01):
     return t, theta, theta_dot, theta_ddot, t_b
 
 
-# ============================================================================
-# === MAIN PROGRAM ===========================================================
-# ============================================================================
+    # ----------------------------------------------------------------------------
+    # MAIN PROGRAM 
+    # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     piper = C_PiperInterface_V2("can0")
@@ -163,7 +158,7 @@ if __name__ == "__main__":
         log_counter += 1
 
     # ------------------------------------------------------------------------
-    # Existing single-waypoint movements (unchanged)
+    # Joint movement code fra PiperSDK GIthub
     # ------------------------------------------------------------------------
     def piper_joint_movement(jointRadians):
         joint_0 = round(jointRadians[0] * factorRadToDeg)
@@ -176,43 +171,32 @@ if __name__ == "__main__":
         piper.MotionCtrl_2(0x01, 0x01, speed, 0x00)
         piper.JointCtrl(joint_0, joint_1, joint_2, joint_3, joint_4, joint_5)
 
-    def piper_linear_movement(XYZRPY6):
-        X = round(XYZRPY6[0] * factorMeterToMicro)
-        Y = round(XYZRPY6[1] * factorMeterToMicro)
-        Z = round(XYZRPY6[2] * factorMeterToMicro)
-        RX = round(XYZRPY6[3] * factorRadToDeg)
-        RY = round(XYZRPY6[4] * factorRadToDeg)
-        RZ = round(XYZRPY6[5] * factorRadToDeg)
-        joint_6 = round(XYZRPY6[6] * factorRadToDeg)
-        print(X, Y, Z, RX, RY, RZ)
-        piper.MotionCtrl_2(0x01, 0x02, speed * 3, 0x00)
-        piper.EndPoseCtrl(X, Y, Z, RX, RY, RZ)
-        piper.GripperCtrl(abs(joint_6), 1000, 0x01, 0)
+
 
     # ------------------------------------------------------------------------
-    # NEW: LSPB trajectory streaming function
+    # LSPB streaming funktioner(Disse bruger vi til at sende instrukserne til robotten)
     # ------------------------------------------------------------------------
     def execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                 dt=TRAJ_STREAM_DT):
         """
-        Generate an LSPB trajectory through `via_points` and stream it to the Piper.
+        Denne del af koden laver trajectory gennem via_points og sender det til Piperen på baggrund af noget input:
 
-        via_points:        np.array shape (n_waypoints, 6) — joint angles in radians
-        segment_durations: list of n_waypoints-1 durations in seconds
-        max_accel:         single rad/s² value, or list of 6 (one per joint)
-        dt:                streaming period in seconds (default 0.02 s = 50 Hz)
+        via_points:        Dette er de forskellige viapoints, der skal vælges i et array
+        segment_durations: varighederne af hvert egment i et array
+        max_accel:         max-accelerationen for robotten. DEtte har vi valgt ud fra det langsomste joint
+        dt:                Dette er, hvor often koden sendes til robotten: 0,02s = 50 Hz 
         """
         via = np.asarray(via_points, dtype=float)
         n_joints = via.shape[1]
-        assert n_joints == 6, "Expected 6-joint trajectory"
+        assert n_joints == 6, "Der forvnetes 6-joint trajectory"
 
-        # Normalise max_accel to a list of 6
+        # Normaliser den valgte max_accel til alle joints
         if np.isscalar(max_accel):
             max_accels = [float(max_accel)] * n_joints
         else:
             max_accels = list(max_accel)
 
-        # 1. Generate position trajectory for each joint
+        # Genrering af position trajectory for hver joint
         joint_trajs = []
         t_array = None
         for j in range(n_joints):
@@ -227,14 +211,11 @@ if __name__ == "__main__":
         print(f"  → Streaming {n_samples} samples over {t_array[-1]:.2f} s "
               f"({1/dt:.0f} Hz)")
 
-        # 2. Configure robot for high-rate position streaming
-        #    move_mode = 0x01 (joint mode), speed = 100 (no internal throttling)
         piper.MotionCtrl_2(0x01, 0x01, TRAJ_STREAM_SPEED, 0x00)
 
-        # 3. Stream each waypoint at the right time
+        # Kør igennem de forskellige points.
         loop_start = time.time()
         for i in range(n_samples):
-            # Convert current joint targets from radians to robot units (0.001°)
             j0 = round(joint_trajs[0][i] * factorRadToDeg)
             j1 = round(joint_trajs[1][i] * factorRadToDeg)
             j2 = round(joint_trajs[2][i] * factorRadToDeg)
@@ -243,7 +224,7 @@ if __name__ == "__main__":
             j5 = round(joint_trajs[5][i] * factorRadToDeg)
             piper.JointCtrl(j0, j1, j2, j3, j4, j5)
 
-            # Sleep until the next sample time
+            # Sleep indtil næste sample
             next_target = loop_start + t_array[i] + dt
             sleep_time = next_target - time.time()
             if sleep_time > 0:
@@ -252,9 +233,9 @@ if __name__ == "__main__":
         elapsed = time.time() - loop_start
         print(f"  → Trajectory complete in {elapsed:.2f} s")
 
-    # ========================================================================
-    # === MAIN LOOP ==========================================================
-    # ========================================================================
+    # ------------------------------------------------------------------------
+    #     MAIN LOOP 
+    # ------------------------------------------------------------------------
     while True:
         count += 1
         log_now = False
@@ -278,25 +259,22 @@ if __name__ == "__main__":
             log_now = True
 
         # --------------------------------------------------------------------
-        #  TRAJ 1  —  Home BI holder → Grip A3 BI Holder via LSPB streaming
+        #  TRAJ 1  —  Home BI holder → Grip A3 BI Holder via LSPB
         elif count == count_constant * 4:
-            print("TRAJ 1 -----------  (LSPB streaming)")
+            print("TRAJ 1 -----------  (LSPB)")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
             pos_start = [0.8099, 1.6641, -1.1255, 0.0, 1.1195, 0.8099]  # Home BI holder
             pos_end   = [0.7134, 1.6627, -0.9093, 0.0, 0.9047, 2.356] #A3 Grip position
 
-            # If you want intermediate via-points (e.g. from dense Cartesian
-            # sampling + IK), insert them as extra rows here:
+            
             via_points = np.array([
                 pos_start,
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+            segment_durations = [3.0]   # tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²  (matches your trajectory plan)
+            max_accel = 3.14           
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -308,9 +286,8 @@ if __name__ == "__main__":
         #  TRAJ 2  —  Grip A3 BI holder → Lift A3 
 
         elif count == count_constant * 5:
-            print("TRAJ 2 -----------  (LSPB streaming)")
+            print("TRAJ 2 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
             pos_start = [0.7134, 1.6627, -0.9093, 0.0, 0.9047, 2.356] #A3 Grip position
             pos_end   = [0.7069, 1.6025, -0.9841, 0.0, 1.0397, 2.356] #A3 Approach 
 
@@ -320,10 +297,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+         
+            segment_durations = [3.0]   # tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²  (matches your trajectory plan)
+            max_accel = 3.14            
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -340,9 +317,9 @@ if __name__ == "__main__":
         #  TRAJ 3  —  B10 Approach → B10 Insert sample
 
         elif count == count_constant * 7:  
-            print("TRAJ 3 -----------  (LSPB streaming)")
+            print("TRAJ 3 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+            
             pos_start = [0.1404, 1.2, -0.82, 0.0, 1.305, 2.356] #B10 Approach
             pos_end   = [0.1395, 1.2639, -0.7622, 0.0, 1.1563, 2.356] #B10 Insert sample 
 
@@ -352,10 +329,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+            
+            segment_durations = [3.0]    #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14           
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -368,9 +345,8 @@ if __name__ == "__main__":
         #  TRAJ 4  —  B10 Insert sample → B10 Approach
 
         elif count == count_constant * 8: 
-            print("TRAJ 4 -----------  (LSPB streaming)")
+            print("TRAJ 4 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
             pos_start = [0.1404, 1.2621, -0.7607, 0.0, 1.1567, 2.356] #B10 Insert sample
             pos_end   = [0.1049, 1.2343, -0.8847, 0.0, 1.3084, 2.356] #B10  Approach
 
@@ -380,8 +356,8 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+            
+            segment_durations = [3.0]    # tid af bevægelsen fra A til B
 
             max_accel = 3.14            # rad/s²
 
@@ -401,25 +377,24 @@ if __name__ == "__main__":
             log_now = True
 
         # --------------------------------------------------------------------
-        #  TRAJ 1  —  Home BI holder → Grip A2 BI Holder via LSPB streaming
+        #  TRAJ 5  —  Home BI holder → Grip A2 BI Holder via LSPB 
         elif count == count_constant * 10: 
-            print("TRAJ 1 -----------  (LSPB streaming)")
+            print("TRAJ 1 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+           
             pos_start = [0.8099, 1.6641, -1.1255, 0.0, 1.1195, 0.8099]  # Home BI holder
             pos_end   = [0.773, 1.7114, -0.9743, 0.0, 0.921, 2.402] #A2 Grip position
 
-            # If you want intermediate via-points (e.g. from dense Cartesian
-            # sampling + IK), insert them as extra rows here:
+          
             via_points = np.array([
                 pos_start,
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+           
+            segment_durations = [3.0]   # tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²  (matches your trajectory plan)
+            max_accel = 3.14         
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -428,12 +403,12 @@ if __name__ == "__main__":
             log_now = True
          # --------------------------------------------------------------------
         # --------------------------------------------------------------------
-        #  TRAJ 2  —  Grip A2 BI holder → Lift A2 
+        #  TRAJ 6  —  Grip A2 BI holder → Lift A2 
 
         elif count == count_constant * 11:
-            print("TRAJ 2 -----------  (LSPB streaming)")
+            print("TRAJ 2 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+      
             pos_start = [0.7718, 1.7116, -0.9746, 0.0, 0.9211, 2.402] #A2 Grip position
             pos_end   = [0.7718, 1.6547, -1.0489, 0.0, 1.0523, 2.402] #A2 Approach 
 
@@ -443,10 +418,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+         
+            segment_durations = [3.0]   # tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²  (matches your trajectory plan)
+            max_accel = 3.14          
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -464,9 +439,9 @@ if __name__ == "__main__":
         #  TRAJ 3  —  B5 Approach → B5 Insert sample
 
         elif count == count_constant * 13:
-            print("TRAJ 3 -----------  (LSPB streaming)")
+            print("TRAJ 3 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+          
             pos_start = [-0.1377, 1.2894, -0.8883, 0.0, 1.2569, -0.1526] #B5 Approach
             pos_end   = [-0.1526, 1.3404, -0.8265, 0.0, 1.1441, -0.1526] #B5 Insert sample 
 
@@ -476,10 +451,9 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14            
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -489,12 +463,12 @@ if __name__ == "__main__":
         # --------------------------------------------------------------------
 
          # --------------------------------------------------------------------
-        #  TRAJ 4  —  B5 Insert sample → B5 Approach
+        #  TRAJ 7  —  B5 Insert sample → B5 Approach
 
         elif count == count_constant * 14:
-            print("TRAJ 4 -----------  (LSPB streaming)")
+            print("TRAJ 4 -----------  (LSPB)")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+         
             pos_start = [-0.1526, 1.3404, -0.8265, 0.0, 1.1441, -0.1526] #B5 Insert sample
             pos_end   = [-0.1526, 1.3038, -0.9511, 0.0, 1.3053, -0.1526] #B5  Approach
 
@@ -504,10 +478,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+          
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14          
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -525,25 +499,23 @@ if __name__ == "__main__":
 
         # --------------------------------------------------------------------
 
-        #  TRAJ 1  —  Home BI holder → Grip A1 BI Holder via LSPB streaming
+        #  TRAJ 8  —  Home BI holder → Grip A1 BI Holder via LSPB 
         elif count == count_constant * 16:
-            print("TRAJ 1 -----------  (LSPB streaming)")
+            print("TRAJ 1 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
             pos_start = [0.8099, 1.6641, -1.1255, 0.0, 1.1195, 0.8099]  # Home BI holder
             pos_end   = [0.8339, 1.7684, -1.0541, 0.0, 0.9437, 2.402] #A1 Grip position
 
-            # If you want intermediate via-points (e.g. from dense Cartesian
-            # sampling + IK), insert them as extra rows here:
+       
             via_points = np.array([
                 pos_start,
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
 
-            max_accel = 3.14            # rad/s²  (matches your trajectory plan)
+            segment_durations = [3.0]   # tid af bevægelsen fra A til B
+
+            max_accel = 3.14           
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -552,12 +524,12 @@ if __name__ == "__main__":
             log_now = True
          # --------------------------------------------------------------------
         # --------------------------------------------------------------------
-        #  TRAJ 2  —  Grip A1 BI holder → Lift A1 
+        #  TRAJ 9  —  Grip A1 BI holder → Lift A1 
 
         elif count == count_constant * 17:
             print("TRAJ 2 -----------  (LSPB streaming)")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+          
             pos_start = [0.8312, 1.7666, -1.0514, 0.0, 0.9429, 2.402] #A1 Grip position
             pos_end   = [0.8312, 1.7126, -1.1245, 0.0, 1.07, 2.402] #A1 Approach 
 
@@ -567,10 +539,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+           
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²  (matches your trajectory plan)
+            max_accel = 3.14           
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -584,12 +556,12 @@ if __name__ == "__main__":
             piper_joint_movement(position)
             log_now = True
         # --------------------------------------------------------------------
-        #  TRAJ 3  —  B1 Approach → B1 Insert sample
+        #  TRAJ 10  —  B1 Approach → B1 Insert sample
 
         elif count == count_constant * 19:
-            print("TRAJ 3 -----------  (LSPB streaming)")
+            print("TRAJ 3 -----------  (LSPB)")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+          
             pos_start = [0.0222, 1.4202, -1.0577, 0.0, 1.2955, 1.593] #B1 Approach
             pos_end   = [0.0222, 1.4565, -0.9375, 0.0, 1.1391, 1.593] #B1 Insert sample 
 
@@ -599,10 +571,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+           
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14            
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -610,12 +582,12 @@ if __name__ == "__main__":
             position = pos_end
             log_now = True
         # --------------------------------------------------------------------
-        #  TRAJ 4  —  B1 Insert sample → B1 Approach
+        #  TRAJ 11  —  B1 Insert sample → B1 Approach
 
         elif count == count_constant * 20:
-            print("TRAJ 4 -----------  (LSPB streaming)")
+            print("TRAJ 4 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+          
             pos_start = [0.0222, 1.4565, -0.9375, 0.0, 1.1391, 1.593] #B1 Insert sample
             pos_end   = [0.0222, 1.4202, -1.0577, 0.0, 1.2955, 1.593] #B1  Approach
 
@@ -625,11 +597,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+           
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
-
+            max_accel = 3.14           
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
 
@@ -647,12 +618,12 @@ if __name__ == "__main__":
             log_now = True
 
         # --------------------------------------------------------------------
-        #  TRAJ 5  —   Lid holder approach → Lid holder Grip lid
+        #  TRAJ 12  —   Lid holder approach → Lid holder Grip lid
 
         elif count == count_constant * 22:
-            print("TRAJ 5 -----------  (LSPB streaming)")
+            print("TRAJ 5 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+          
             pos_start = [-0.5329, 1.4513, -1.0888, 0.0, 1.2956, -0.5329] #Lid holder approach
             pos_end   = [-0.5329, 1.5664, -0.8417, 0.0, 0.9333, -0.5329] #Lid holder Grip lid
 
@@ -662,10 +633,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+           
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14            
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -674,12 +645,12 @@ if __name__ == "__main__":
             log_now = True
         # --------------------------------------------------------------------
         # --------------------------------------------------------------------
-        #  TRAJ 6  —   Lid holder approach → Lid holder Grip lid
+        #  TRAJ 13  —   Lid holder approach → Lid holder Grip lid
 
         elif count == count_constant * 23:
-            print("TRAJ 6 -----------  (LSPB streaming)")
+            print("TRAJ 6 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+   
             pos_start = [-0.5329, 1.5664, -0.8417, 0.0, 0.9333, -0.5329] #Lid holder Grip lid
             pos_end   = [-0.5329, 1.4676, -1.0239, 0.0, 1.2144, -0.5329] #Lid holder approach
 
@@ -689,10 +660,9 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+            segment_durations = [3.0]  #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14            
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -713,12 +683,12 @@ if __name__ == "__main__":
             piper_joint_movement(position)
             log_now = True
         # --------------------------------------------------------------------
-        #  TRAJ 7  —   BO Incubator Lid on approach  → BO Incubator Lid on
+        #  TRAJ 14  —   BO Incubator Lid on approach  → BO Incubator Lid on
 
         elif count == count_constant * 26:
-            print("TRAJ 7 -----------  (LSPB streaming)")
+            print("TRAJ 7 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+           
             pos_start = [0.0111, 1.0171, -0.9242, -0.0046, 1.1725, 0.0088] #BO Incubator Lid on approach 
             pos_end   = [0.0075, 1.271, -0.8934, 0.0, 1.2805, 0.0075] #BO Incubator Lid on
 
@@ -728,8 +698,7 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
             max_accel = 3.14            # rad/s²
 
@@ -741,12 +710,12 @@ if __name__ == "__main__":
         # --------------------------------------------------------------------
 
         # --------------------------------------------------------------------
-        #  TRAJ 8  —   BO Incubator Lid on  → BO Incubator Lid on approach
+        #  TRAJ 15  —   BO Incubator Lid on  → BO Incubator Lid on approach
 
         elif count == count_constant * 27:
-            print("TRAJ 8 -----------  (LSPB streaming)")
+            print("TRAJ 8 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+          
             pos_start = [0.0075, 1.271, -0.8934, 0.0, 1.2805, 0.0075] #BO Incubator Lid on 
             pos_end   = [0.0073, 1.2739, -1.0104, 0.0000, 1.3945, 0.0073] #BO Incubator Lid on approach 
 
@@ -756,10 +725,9 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14            
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -780,12 +748,12 @@ if __name__ == "__main__":
             piper_joint_movement(position)
             log_now = True
         # --------------------------------------------------------------------
-        #  TRAJ 9  —   BO Incubator Lid on approach  → BO Incubator Lid on
+        #  TRAJ 16  —   BO Incubator Lid on approach  → BO Incubator Lid on
 
         elif count == count_constant * 30:
-            print("TRAJ 9 -----------  (LSPB streaming)")
+            print("TRAJ 9 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+          
             pos_start = [0.0111, 1.0171, -0.9242, -0.0046, 1.1725, 0.0088] #BO Incubator Lid on approach 
             pos_end   = [0.0075, 1.271, -0.8934, 0.0, 1.2805, 0.0075] #BO Incubator Lid on
 
@@ -795,10 +763,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+            
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14            
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -808,12 +776,12 @@ if __name__ == "__main__":
         # --------------------------------------------------------------------
 
         # --------------------------------------------------------------------
-        #  TRAJ 10  —   BO Incubator Lid on  → BO Incubator Lid on approach
+        #  TRAJ 17  —   BO Incubator Lid on  → BO Incubator Lid on approach
 
         elif count == count_constant * 31:
-            print("TRAJ 10 -----------  (LSPB streaming)")
+            print("TRAJ 10 -----------  (LSPB)")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+           
             pos_start = [0.0075, 1.271, -0.8934, 0.0, 1.2805, 0.0075] #BO Incubator Lid on 
             pos_end   = [0.0111, 1.0171, -0.9242, -0.0046, 1.1725, 0.0088] #BO Incubator Lid on approach 
 
@@ -823,10 +791,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+           
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14            
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -842,12 +810,12 @@ if __name__ == "__main__":
             log_now = True
 
         # --------------------------------------------------------------------
-        #  TRAJ 11 —   Lid holder approach → Lid holder Grip lid
+        #  TRAJ 18 —   Lid holder approach → Lid holder Grip lid
 
         elif count == count_constant * 33:
-            print("TRAJ 11 -----------  (LSPB streaming)")
+            print("TRAJ 11 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+         
             pos_start = [-0.5329, 1.4513, -1.0888, 0.0, 1.2956, -0.5329] #Lid holder approach
             pos_end   = [-0.5226, 1.5575, -0.8406, 0.0, 0.9411, -0.5226] #Lid holder Grip lid
 
@@ -857,10 +825,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+           
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14            
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -869,12 +837,12 @@ if __name__ == "__main__":
             log_now = True
         # --------------------------------------------------------------------
         # --------------------------------------------------------------------
-        #  TRAJ 12  —   Lid holder approach → Lid holder Grip lid
+        #  TRAJ 19  —   Lid holder approach → Lid holder Grip lid
 
         elif count == count_constant * 34:
-            print("TRAJ 12 -----------  (LSPB streaming)")
+            print("TRAJ 12 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+           
             pos_start = [-0.5226, 1.5575, -0.8406, 0.0, 0.9411, -0.5226] #Lid holder Grip lid
             pos_end   = [-0.5329, 1.4513, -1.0888, 0.0, 1.2956, -0.5329] #Lid holder approach
 
@@ -884,10 +852,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+          
+            segment_durations = [3.0]  #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14            
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -902,12 +870,12 @@ if __name__ == "__main__":
             piper_joint_movement(position)
             log_now = True
         # --------------------------------------------------------------------
-        #  TRAJ 13  —  B1 Approach → B1 Insert sample
+        #  TRAJ 20  —  B1 Approach → B1 Insert sample
 
         elif count == count_constant * 36:
-            print("TRAJ 13 -----------  (LSPB streaming)")
+            print("TRAJ 13 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+           
             pos_start = [0.0222, 1.4202, -1.0577, 0.0, 1.2955, 1.593] #B1 Approach
             pos_end   = [0.0222, 1.4623, -0.9244, 0.0, 1.1202, 1.593] #B1 Insert sample 
 
@@ -917,10 +885,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+         
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14            
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -930,12 +898,12 @@ if __name__ == "__main__":
         # --------------------------------------------------------------------
 
         # --------------------------------------------------------------------
-        #  TRAJ 14  —  B1 Insert sample → B1 Approach
+        #  TRAJ 21 —  B1 Insert sample → B1 Approach
 
         elif count == count_constant * 37:
-            print("TRAJ 14 -----------  (LSPB streaming)")
+            print("TRAJ 14 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+            
             pos_start = [0.0222, 1.4623, -0.9244, 0.0, 1.1202, 1.593] #B1 Insert sample
             pos_end   = [0.0222, 1.4276, -1.0244, 0.0, 1.2548, 1.59] #B1  Approach
 
@@ -945,10 +913,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+          
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14            
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -963,12 +931,12 @@ if __name__ == "__main__":
             piper_joint_movement(position)
             log_now = True
         # --------------------------------------------------------------------
-        #  TRAJ 15  —  Sample tray approach → sample tray
+        #  TRAJ 22  —  Sample tray approach → sample tray
 
         elif count == count_constant * 39:
-            print("TRAJ 15 -----------  (LSPB streaming)")
+            print("TRAJ 15 -----------  (LSPB)")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+            
             pos_start = [-0.9601, 1.6696, -1.1747, 0.0, 1.1632, -0.9601] #Sample tray approach
             pos_end   = [-0.9601, 1.7088, -1.0975, 0.0, 1.0469, -0.9601] #Sample tray
 
@@ -978,10 +946,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+            
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14           
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -990,12 +958,12 @@ if __name__ == "__main__":
             log_now = True
         # --------------------------------------------------------------------
         # --------------------------------------------------------------------
-        #  TRAJ 16  —  Sample tray→ sample tray approach 
+        #  TRAJ 23  —  Sample tray→ sample tray approach 
 
         elif count == count_constant * 40:
-            print("TRAJ 16 -----------  (LSPB streaming)")
+            print("TRAJ 16 -----------  (LSPB)")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+          
             pos_start = [-0.9601, 1.7088, -1.0975, 0.0, 1.0469, -0.9601] #Sample tray 
             pos_end   = [-0.9601, 1.6696, -1.1747, 0.0, 1.1632, -0.9601] #Sample tray approach
 
@@ -1005,10 +973,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+           
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14            
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -1027,9 +995,9 @@ if __name__ == "__main__":
         #  TRAJ 13  —  B5 Approach → B5 Insert sample
 
         elif count == count_constant * 42:
-            print("TRAJ 13 -----------  (LSPB streaming)")
+            print("TRAJ 24 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+            
             pos_start = [-0.1377, 1.2894, -0.8883, 0.0, 1.2569, -0.1526] #B5 Approach
             pos_end   = [-0.1526, 1.343, -0.8204, 0.0, 1.1354, -0.1526] #B5 Insert sample
 
@@ -1039,10 +1007,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+           
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14           
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -1052,12 +1020,12 @@ if __name__ == "__main__":
         # --------------------------------------------------------------------
 
         # --------------------------------------------------------------------
-        #  TRAJ 14  —  B5 Insert sample → B5 Approach
+        #  TRAJ 25  —  B5 Insert sample → B5 Approach
 
         elif count == count_constant * 43:
-            print("TRAJ 14 -----------  (LSPB streaming)")
+            print("TRAJ 14 -----------  (LSPB)")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+            
             pos_start = [-0.1526, 1.343, -0.8204, 0.0, 1.1354, -0.1526] #B5 Insert sample
             pos_end   = [-0.1541, 1.2967, -0.93, 0.0, 1.3064, -0.1526] #B5  Approach
 
@@ -1067,10 +1035,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+           
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14            
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -1085,12 +1053,12 @@ if __name__ == "__main__":
             piper_joint_movement(position)
             log_now = True
         # --------------------------------------------------------------------
-        #  TRAJ 15  —  Sample tray approach → sample tray
+        #  TRAJ 26  —  Sample tray approach → sample tray
 
         elif count == count_constant * 45:
-            print("TRAJ 15 -----------  (LSPB streaming)")
+            print("TRAJ 15 -----------  (LSPB)")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+           
             pos_start = [-0.9601, 1.6696, -1.1747, 0.0, 1.1632, -0.9601] #Sample tray approach
             pos_end   = [-0.9601, 1.7088, -1.0975, 0.0, 1.0469, -0.9601] #Sample tray
 
@@ -1100,10 +1068,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+            
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14            
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -1112,12 +1080,12 @@ if __name__ == "__main__":
             log_now = True
         # --------------------------------------------------------------------
         # --------------------------------------------------------------------
-        #  TRAJ 16  —  Sample tray→ sample tray approach 
+        #  TRAJ 27  —  Sample tray→ sample tray approach 
 
         elif count == count_constant * 46:
-            print("TRAJ 16 -----------  (LSPB streaming)")
+            print("TRAJ 16 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+        
             pos_start = [-0.9601, 1.7088, -1.0975, 0.0, 1.0469, -0.9601] #Sample tray 
             pos_end   = [-0.9601, 1.6696, -1.1747, 0.0, 1.1632, -0.9601] #Sample tray approach
 
@@ -1127,10 +1095,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+         
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14            
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -1145,12 +1113,12 @@ if __name__ == "__main__":
             piper_joint_movement(position)
             log_now = True
         # --------------------------------------------------------------------
-        #  TRAJ 13  —  B10 Approach → B10 Insert sample
+        #  TRAJ 28  —  B10 Approach → B10 Insert sample
 
         elif count == count_constant * 48:
-            print("TRAJ 13 -----------  (LSPB streaming)")
+            print("TRAJ 13 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+        
             pos_start = [0.1404, 1.2354, -0.845, 0.0, 1.2677, 2.356] #B10 Approach
             pos_end   = [0.1315, 1.2696, -0.7583, 0.0, 1.1467, 2.356] #B10 Insert sample 
 
@@ -1160,10 +1128,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+        
+            segment_durations = [3.0]  #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14            
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -1173,12 +1141,12 @@ if __name__ == "__main__":
         # --------------------------------------------------------------------
 
         # --------------------------------------------------------------------
-        #  TRAJ 14  —  B10 Insert sample → B10 Approach
+        #  TRAJ 29  —  B10 Insert sample → B10 Approach
 
         elif count == count_constant * 49:
-            print("TRAJ 14 -----------  (LSPB streaming)")
+            print("TRAJ 14 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+           
             pos_start = [0.1315, 1.2696, -0.7583, 0.0, 1.1467, 2.356] #B10 Insert sample
             pos_end   = [0.1315, 1.2359, -0.8677, 0.0, 1.2899, 2.356] #B10  Approach
 
@@ -1188,10 +1156,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+           
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14            
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -1206,12 +1174,12 @@ if __name__ == "__main__":
             piper_joint_movement(position)
             log_now = True
         # --------------------------------------------------------------------
-        #  TRAJ 15  —  Sample tray approach → sample tray
+        #  TRAJ 30  —  Sample tray approach → sample tray
 
         elif count == count_constant * 51:
-            print("TRAJ 15 -----------  (LSPB streaming)")
+            print("TRAJ 15 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+            
             pos_start = [-0.9601, 1.6696, -1.1747, 0.0, 1.1632, -0.9601] #Sample tray approach
             pos_end   = [-0.9601, 1.7088, -1.0975, 0.0, 1.0469, -0.9601] #Sample tray
 
@@ -1221,10 +1189,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+          
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14           
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
@@ -1233,12 +1201,12 @@ if __name__ == "__main__":
             log_now = True
         # --------------------------------------------------------------------
         # --------------------------------------------------------------------
-        #  TRAJ 16  —  Sample tray→ sample tray approach 
+        #  TRAJ 31  —  Sample tray→ sample tray approach 
 
         elif count == count_constant * 52:
-            print("TRAJ 16 -----------  (LSPB streaming)")
+            print("TRAJ 16 -----------  (LSPB )")
 
-            # Start = current pos (Pos 2),  end = next target (Pos 3)
+        
             pos_start = [-0.9601, 1.7088, -1.0975, 0.0, 1.0469, -0.9601] #Sample tray 
             pos_end   = [-0.9601, 1.6696, -1.1747, 0.0, 1.1632, -0.9601] #Sample tray approach
 
@@ -1248,10 +1216,10 @@ if __name__ == "__main__":
                 pos_end,
             ])
 
-            # One segment_duration per gap between via-points
-            segment_durations = [3.0]   # 3 s for the single A→B segment
+           
+            segment_durations = [3.0]   #tid af bevægelsen fra A til B
 
-            max_accel = 3.14            # rad/s²
+            max_accel = 3.14           
 
             execute_lspb_trajectory(via_points, segment_durations, max_accel,
                                     dt=TRAJ_STREAM_DT)
